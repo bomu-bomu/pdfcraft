@@ -97,8 +97,9 @@ pub fn shape(bytes: &[u8], text: &str) -> Result<ShapedRun, String> {
 /// Mark each left-to-right cluster of several glyphs for a span, and give each of its glyphs its
 /// own character when the cluster has as many glyphs as characters and they correspond in order:
 /// every glyph is its character's own (the face's cmap), or the cluster is Thai, whose shaping
-/// substitutes mark forms one for one and never reorders them (Sara Am, split into two glyphs,
-/// has one more glyph than characters). Otherwise the text stays on the first glyph. `glyphs` and
+/// substitutes mark forms one for one (Sara Am, split into two glyphs, has one more glyph than
+/// characters) and whose own glyphs are all where their characters are, so shaping didn't
+/// reorder its marks. Otherwise the text stays on the first glyph. `glyphs` and
 /// `clusters` (harfrust's cluster of each) are one run, in order; each cluster's text is already
 /// on its first glyph.
 fn split_clusters(glyphs: &mut [ShapedGlyph], clusters: &[u32], nominal: impl Fn(char) -> Option<GlyphId>) {
@@ -114,7 +115,12 @@ fn split_clusters(glyphs: &mut [ShapedGlyph], clusters: &[u32], nominal: impl Fn
         let text = group.first().map(|g| g.text.clone()).unwrap_or_default();
         let chars: Vec<char> = text.chars().collect();
         let thai = chars.iter().all(|c| matches!(u32::from(*c), 0x0e01..=0x0e5b));
-        if chars.len() == group.len() && (thai || group.iter().zip(&chars).all(|(g, c)| nominal(*c) == Some(g.id))) {
+        // Shaping sorts a cluster's marks by combining class (`กฺุ` is drawn with ุ before ฺ, and
+        // a tone typed before a lower vowel after it), so a glyph that is some character's own
+        // must stand at that character's place. A substituted form (a lowered tone mark) is no
+        // character's own and can't show the order; it keeps its place among the others.
+        let in_order = group.iter().zip(&chars).all(|(g, c)| nominal(*c) == Some(g.id) || !chars.iter().any(|o| nominal(*o) == Some(g.id)));
+        if chars.len() == group.len() && in_order && (thai || group.iter().zip(&chars).all(|(g, c)| nominal(*c) == Some(g.id))) {
             for (glyph, c) in group.iter_mut().zip(chars) {
                 glyph.text = c.to_string();
             }
@@ -147,17 +153,22 @@ mod tests {
     /// face's cmap is a function from characters to glyphs.
     #[test]
     fn clusters_map_each_glyph_to_its_character_where_they_correspond() {
-        // The face's own glyphs: ก 10, ท 11, น 12, ี 20, ่ 21, ้ 22, า 23, ํ 24, q 30, ́ 31.
+        // The face's own glyphs: ก 10, ท 11, น 12, ป 13, ี 20, ่ 21, ้ 22, า 23, ํ 24, ุ 25, ู 26, ฺ 27,
+        // q 30, ́ 31.
         let nominal = |c: char| {
             let id = match c {
                 'ก' => 10,
                 'ท' => 11,
                 'น' => 12,
+                'ป' => 13,
                 '\u{e35}' => 20,
                 '\u{e48}' => 21,
                 '\u{e49}' => 22,
                 '\u{e32}' => 23,
                 '\u{e4d}' => 24,
+                '\u{e38}' => 25,
+                '\u{e39}' => 26,
+                '\u{e3a}' => 27,
                 'q' => 30,
                 '\u{301}' => 31,
                 _ => return None,
@@ -166,9 +177,14 @@ mod tests {
         };
         let texts = |glyphs: &[ShapedGlyph]| glyphs.iter().map(|g| g.text.clone()).collect::<Vec<_>>();
         let spans = |glyphs: &[ShapedGlyph]| glyphs.iter().map(|g| g.span.clone()).collect::<Vec<_>>();
-        let cases: [(&str, &[u32], &[&str]); 7] = [
+        let cases: [(&str, &[u32], &[&str]); 10] = [
             // Thai, with the tone mark swapped for a lowered form (99): still one for one.
             ("ที่", &[11, 20, 99], &["ท", "\u{e35}", "\u{e48}"]),
+            ("ปู่", &[13, 26, 99], &["ป", "\u{e39}", "\u{e48}"]),
+            // Marks shaping reordered by combining class: ุ drawn before ฺ, and a tone typed before
+            // its lower vowel drawn after it. The cluster stays on the first glyph.
+            ("ก\u{e3a}\u{e38}", &[10, 25, 27], &["ก\u{e3a}\u{e38}", "", ""]),
+            ("ป\u{e48}\u{e39}", &[13, 26, 99], &["ป\u{e48}\u{e39}", "", ""]),
             // Sara Am split into nikhahit and sara aa: one more glyph than characters.
             ("น้ำ", &[12, 24, 22, 23], &["น้ำ", "", "", ""]),
             // Latin with the face's own mark glyph.
@@ -198,5 +214,21 @@ mod tests {
         split_clusters(&mut glyphs, &[0, 3, 3, 3], nominal);
         assert_eq!(texts(&glyphs), ["ก", "ท", "\u{e35}", "\u{e48}"]);
         assert_eq!(spans(&glyphs), [None, Some(("ที่".to_owned(), 3)), None, None]);
+    }
+
+    /// The same with a real face's shaping, where the checkout has a static Thai one (Sarabun):
+    /// the marks shaping reorders keep their cluster on the first glyph, the rest map one for one.
+    #[test]
+    fn real_thai_shaping_maps_glyphs_only_in_typing_order() {
+        let Some(bytes) =
+            option_env!("CRAFT_FONTS_DIR").and_then(|d| std::fs::read(std::path::Path::new(d).join("fonts/sarabun/Sarabun-Regular.ttf")).ok())
+        else {
+            return;
+        };
+        let texts = |text: &str| shape(&bytes, text).unwrap().glyphs.into_iter().map(|g| g.text).collect::<Vec<_>>();
+        assert_eq!(texts("ปู่"), ["ป", "\u{e39}", "\u{e48}"]);
+        assert_eq!(texts("กิ่"), ["ก", "\u{e34}", "\u{e48}"]);
+        assert_eq!(texts("ป\u{e48}\u{e39}"), ["ป\u{e48}\u{e39}", "", ""]);
+        assert_eq!(texts("ก\u{e3a}\u{e38}"), ["ก\u{e3a}\u{e38}", "", ""]);
     }
 }
