@@ -124,3 +124,79 @@ fn split_clusters(glyphs: &mut [ShapedGlyph], clusters: &[u32], nominal: impl Fn
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A cluster's glyphs as shaping leaves them: its text on the first glyph, none on the rest.
+    fn cluster(text: &str, ids: &[u32]) -> Vec<ShapedGlyph> {
+        ids.iter()
+            .enumerate()
+            .map(|(i, id)| ShapedGlyph {
+                id: GlyphId::new(*id),
+                position: [0.0, 0.0],
+                text: if i == 0 { text.to_owned() } else { String::new() },
+                span: None,
+            })
+            .collect()
+    }
+
+    /// #4919: each glyph of a cluster takes its own character when they correspond one for one,
+    /// and every cluster of several glyphs is marked for its own span. No font is needed: the
+    /// face's cmap is a function from characters to glyphs.
+    #[test]
+    fn clusters_map_each_glyph_to_its_character_where_they_correspond() {
+        // The face's own glyphs: ก 10, ท 11, น 12, ี 20, ่ 21, ้ 22, า 23, ํ 24, q 30, ́ 31.
+        let nominal = |c: char| {
+            let id = match c {
+                'ก' => 10,
+                'ท' => 11,
+                'น' => 12,
+                '\u{e35}' => 20,
+                '\u{e48}' => 21,
+                '\u{e49}' => 22,
+                '\u{e32}' => 23,
+                '\u{e4d}' => 24,
+                'q' => 30,
+                '\u{301}' => 31,
+                _ => return None,
+            };
+            Some(GlyphId::new(id))
+        };
+        let texts = |glyphs: &[ShapedGlyph]| glyphs.iter().map(|g| g.text.clone()).collect::<Vec<_>>();
+        let spans = |glyphs: &[ShapedGlyph]| glyphs.iter().map(|g| g.span.clone()).collect::<Vec<_>>();
+        let cases: [(&str, &[u32], &[&str]); 7] = [
+            // Thai, with the tone mark swapped for a lowered form (99): still one for one.
+            ("ที่", &[11, 20, 99], &["ท", "\u{e35}", "\u{e48}"]),
+            // Sara Am split into nikhahit and sara aa: one more glyph than characters.
+            ("น้ำ", &[12, 24, 22, 23], &["น้ำ", "", "", ""]),
+            // Latin with the face's own mark glyph.
+            ("q\u{301}", &[30, 31], &["q", "\u{301}"]),
+            // Latin whose mark was substituted (a stacking form): the glyphs can't be told apart.
+            ("q\u{301}", &[30, 98], &["q\u{301}", ""]),
+            // Devanagari reordered (the i-matra drawn before its consonant): not split.
+            ("कि", &[41, 40], &["कि", ""]),
+            // A ligature: one glyph for two characters, no span needed.
+            ("fi", &[50], &["fi"]),
+            // A letter on its own.
+            ("ก", &[10], &["ก"]),
+        ];
+        for (text, ids, expected) in cases {
+            let mut glyphs = cluster(text, ids);
+            let clusters = vec![7; glyphs.len()];
+            split_clusters(&mut glyphs, &clusters, nominal);
+            assert_eq!(texts(&glyphs), expected.iter().map(|s| s.to_string()).collect::<Vec<_>>(), "{text}");
+            let span = (ids.len() > 1).then(|| (text.to_owned(), ids.len()));
+            let mut want = vec![None; ids.len()];
+            want[0] = span;
+            assert_eq!(spans(&glyphs), want, "{text}");
+        }
+        // Clusters are found by harfrust's cluster values, one run after another.
+        let mut glyphs = cluster("ก", &[10]);
+        glyphs.extend(cluster("ที่", &[11, 20, 21]));
+        split_clusters(&mut glyphs, &[0, 3, 3, 3], nominal);
+        assert_eq!(texts(&glyphs), ["ก", "ท", "\u{e35}", "\u{e48}"]);
+        assert_eq!(spans(&glyphs), [None, Some(("ที่".to_owned(), 3)), None, None]);
+    }
+}
