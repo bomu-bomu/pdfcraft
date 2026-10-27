@@ -5788,9 +5788,10 @@ fn page_to_unicode_maps(doc: &Document) -> Vec<String> {
 fn an_edited_shaped_run_maps_each_glyph_to_its_own_characters() {
     let inter = include_bytes!("../../../assets/fonts/Inter-Regular.ttf").as_slice();
     // A static Thai face: the build's, or Sarabun from the craft-fonts checkout (the variable
-    // Noto Sans Thai can't be embedded). Without one, only the Latin case runs.
-    let sarabun =
-        option_env!("CRAFT_FONTS_DIR").and_then(|dir| std::fs::read(std::path::Path::new(dir).join("fonts/sarabun/Sarabun-Regular.ttf")).ok());
+    // Noto Sans Thai can't be embedded). Without one, only the Latin case runs. A relative
+    // `CRAFT_FONTS_DIR` is resolved as the fonts build script reads it, from that crate's folder.
+    let fonts_crate = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../fonts");
+    let sarabun = option_env!("CRAFT_FONTS_DIR").and_then(|dir| std::fs::read(fonts_crate.join(dir).join("fonts/sarabun/Sarabun-Regular.ttf")).ok());
     let thai = pdfcraft_fonts::document_thai_font()
         .map(|f| f.bytes.to_vec())
         .filter(|b| pdfcraft_fonts::embedding::validate(b).is_ok())

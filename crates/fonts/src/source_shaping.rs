@@ -119,8 +119,14 @@ fn split_clusters(glyphs: &mut [ShapedGlyph], clusters: &[u32], nominal: impl Fn
         // a tone typed before a lower vowel after it), so a glyph that is some character's own
         // must stand at that character's place. A substituted form (a lowered tone mark) is no
         // character's own and can't show the order; it keeps its place among the others.
-        let in_order = group.iter().zip(&chars).all(|(g, c)| nominal(*c) == Some(g.id) || !chars.iter().any(|o| nominal(*o) == Some(g.id)));
-        if chars.len() == group.len() && in_order && (thai || group.iter().zip(&chars).all(|(g, c)| nominal(*c) == Some(g.id))) {
+        // The characters' own glyphs are collected once, so a cluster of many marks stays linear.
+        let one_for_one = chars.len() == group.len() && {
+            let own: Vec<Option<GlyphId>> = chars.iter().map(|c| nominal(*c)).collect();
+            let owned: std::collections::HashSet<GlyphId> = own.iter().flatten().copied().collect();
+            let in_order = group.iter().zip(&own).all(|(g, o)| *o == Some(g.id) || !owned.contains(&g.id));
+            in_order && (thai || group.iter().zip(&own).all(|(g, o)| *o == Some(g.id)))
+        };
+        if one_for_one {
             for (glyph, c) in group.iter_mut().zip(chars) {
                 glyph.text = c.to_string();
             }
@@ -216,19 +222,39 @@ mod tests {
         assert_eq!(spans(&glyphs), [None, Some(("ที่".to_owned(), 3)), None, None]);
     }
 
-    /// The same with a real face's shaping, where the checkout has a static Thai one (Sarabun):
-    /// the marks shaping reorders keep their cluster on the first glyph, the rest map one for one.
+    /// The same with real shaping, by every Thai face this build embeds: the interface face (Noto
+    /// Sans Thai, in every build with craft-fonts, CI's included) and the document face. Shaping
+    /// reads the font only, so a variable face does. The marks shaping reorders keep their cluster
+    /// on the first glyph; the rest map one for one.
     #[test]
     fn real_thai_shaping_maps_glyphs_only_in_typing_order() {
-        let Some(bytes) =
-            option_env!("CRAFT_FONTS_DIR").and_then(|d| std::fs::read(std::path::Path::new(d).join("fonts/sarabun/Sarabun-Regular.ttf")).ok())
-        else {
-            return;
-        };
-        let texts = |text: &str| shape(&bytes, text).unwrap().glyphs.into_iter().map(|g| g.text).collect::<Vec<_>>();
-        assert_eq!(texts("ปู่"), ["ป", "\u{e39}", "\u{e48}"]);
-        assert_eq!(texts("กิ่"), ["ก", "\u{e34}", "\u{e48}"]);
-        assert_eq!(texts("ป\u{e48}\u{e39}"), ["ป\u{e48}\u{e39}", "", ""]);
-        assert_eq!(texts("ก\u{e3a}\u{e38}"), ["ก\u{e3a}\u{e38}", "", ""]);
+        let mut faces = crate::ui_thai_fonts();
+        faces.extend(crate::document_thai_font().filter(|d| !faces.iter().any(|f| std::ptr::eq(*f, *d))));
+        for face in faces {
+            let texts = |text: &str| shape(face.bytes, text).unwrap().glyphs.into_iter().map(|g| g.text).collect::<Vec<_>>();
+            let name = face.family;
+            assert_eq!(texts("ปู่"), ["ป", "\u{e39}", "\u{e48}"], "{name}");
+            assert_eq!(texts("กิ่"), ["ก", "\u{e34}", "\u{e48}"], "{name}");
+            assert_eq!(texts("ป\u{e48}\u{e39}"), ["ป\u{e48}\u{e39}", "", ""], "{name}");
+            assert_eq!(texts("ก\u{e3a}\u{e38}"), ["ก\u{e3a}\u{e38}", "", ""], "{name}");
+        }
+    }
+
+    /// A cluster of many marks (one letter with 20,000 tone marks, within the input limit) looks
+    /// each character's own glyph up once, not once per glyph, so it can't stall shaping.
+    #[test]
+    fn a_cluster_of_many_marks_looks_each_character_up_once() {
+        let text: String = std::iter::once('ก').chain(std::iter::repeat_n('\u{e48}', 20_000)).collect();
+        let mut ids = vec![10];
+        ids.extend(std::iter::repeat_n(99, 20_000));
+        let mut glyphs = cluster(&text, &ids);
+        let clusters = vec![0; glyphs.len()];
+        let lookups = std::cell::Cell::new(0usize);
+        split_clusters(&mut glyphs, &clusters, |c| {
+            lookups.set(lookups.get() + 1);
+            (c == 'ก').then(|| GlyphId::new(10))
+        });
+        assert_eq!(glyphs.last().map(|g| g.text.as_str()), Some("\u{e48}"));
+        assert!(lookups.get() <= ids.len(), "{} lookups for {} characters", lookups.get(), ids.len());
     }
 }
