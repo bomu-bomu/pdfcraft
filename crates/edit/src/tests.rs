@@ -5708,6 +5708,8 @@ fn a_new_character_comes_from_the_source_fonts_own_embedded_program() {
     }
 }
 
+/// An edited shaped run (Latin with marks, by Inter) is one text object, one `Tm` and `TJ`s only,
+/// and each glyph is drawn where shaping put it, raised marks included.
 #[test]
 fn a_shaped_run_is_one_text_object_with_each_glyph_where_shaping_put_it() {
     let inter = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");

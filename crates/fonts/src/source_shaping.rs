@@ -32,6 +32,11 @@ pub fn required(text: &str) -> bool {
         .any(|c| matches!(u32::from(c), 0x0300..=0x036f | 0x0590..=0x0fff | 0x1780..=0x17ff | 0x200c..=0x200f | 0x202a..=0x202e | 0x2066..=0x2069))
 }
 
+/// Shape one row of `text` with the face in `bytes`, run by run in visual (bidi) order: each glyph
+/// with its position in ems and the characters it stands for in `/ToUnicode`, its left-to-right
+/// clusters marked for their own `/ActualText` spans ([`ShapedGlyph::span`]). Errors on a row
+/// over 256 KiB or with a line break, a face that can't be read, Arabic or Khmer in a face with no
+/// `GSUB`, and a glyph the face lacks.
 pub fn shape(bytes: &[u8], text: &str) -> Result<ShapedRun, String> {
     if text.len() > 262_144 || text.contains(['\n', '\r']) {
         return Err("shape one bounded text row at a time".into());
@@ -281,6 +286,7 @@ mod tests {
                 sequences.iter().filter(|s| s.len() < 3).flat_map(|s| MARKS.iter().map(move |m| [s.as_slice(), &[*m]].concat())).collect();
             sequences.extend(longer);
         }
+        /// Every order of `rest`: the drawn orders shaping could give a cluster's marks.
         fn permutations(rest: Vec<usize>) -> Vec<Vec<usize>> {
             if rest.is_empty() {
                 return vec![Vec::new()];

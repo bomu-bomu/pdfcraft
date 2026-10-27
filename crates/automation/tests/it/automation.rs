@@ -7851,6 +7851,8 @@ fn command_batch_tells_a_tool_name_from_an_unknown_or_toolless_command() {
     );
 }
 
+/// Thai added through the tools survives save and reopen, extracts as typed, renders and can be
+/// updated; with no document Thai face, Add Text refuses it and adds nothing.
 #[test]
 fn thai_text_through_tools_saves_reopens_extracts_and_renders() {
     let dir = workdir("thai-content");
