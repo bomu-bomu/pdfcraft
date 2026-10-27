@@ -5764,19 +5764,47 @@ fn a_shaped_run_is_one_text_object_with_each_glyph_where_shaping_put_it() {
     assert_eq!(rise, 0.0, "the rise is reset after the run");
 }
 
-/// The decoded `/ToUnicode` maps of the first page's fonts.
-fn page_to_unicode_maps(doc: &Document) -> Vec<String> {
+/// The `/ToUnicode` destination of every glyph the first page shows in a shaped-run font
+/// (`PCFull…`), in drawing order: what a reader that ignores `/ActualText` copies.
+fn shaped_glyph_destinations(doc: &Document) -> Vec<String> {
     let page = pdfcraft_model::pages(doc).remove(0);
     let resources = page.dict.get(b"Resources").and_then(|r| doc.resolve(r).as_dict().cloned()).unwrap_or_default();
     let fonts = resources.get(b"Font").and_then(|f| doc.resolve(f).as_dict().cloned()).unwrap_or_default();
-    fonts
-        .iter()
-        .filter_map(|(_, f)| doc.resolve(f).as_dict().cloned())
-        .filter_map(|f| match &*doc.resolve(f.get(b"ToUnicode")?) {
-            Object::Stream(s) => Some(String::from_utf8_lossy(&s.decoded().unwrap()).into_owned()),
-            _ => None,
-        })
-        .collect()
+    let map_of = |name: &[u8]| -> std::collections::HashMap<u16, String> {
+        let font = doc.resolve(fonts.get(name).unwrap()).as_dict().unwrap().clone();
+        let Object::Stream(cmap) = &*doc.resolve(font.get(b"ToUnicode").unwrap()) else { panic!("no ToUnicode") };
+        let text = String::from_utf8(cmap.decoded().unwrap()).unwrap();
+        text.lines()
+            .filter_map(|line| {
+                let (code, dest) = line.strip_prefix('<')?.split_once("> <")?;
+                let units: Vec<u16> = dest
+                    .trim_end_matches('>')
+                    .as_bytes()
+                    .chunks(4)
+                    .map(|h| u16::from_str_radix(std::str::from_utf8(h).unwrap(), 16).unwrap())
+                    .collect();
+                Some((u16::from_str_radix(code, 16).ok()?, String::from_utf16(&units).unwrap()))
+            })
+            .collect()
+    };
+    let (mut map, mut out) = (None, Vec::new());
+    for op in pdfcraft_content::parse(&page_content_bytes(doc, 0)).ops {
+        if op.is("Tf") {
+            let name = op.operands[0].as_name().unwrap().to_vec();
+            map = name.starts_with(b"PCFull").then(|| map_of(&name));
+            continue;
+        }
+        let Some(map) = &map else { continue };
+        let strings: Vec<Vec<u8>> = match op.op.as_slice() {
+            b"TJ" => op.operands[0].as_array().unwrap().iter().filter_map(|o| o.as_string().map(|s| s.bytes.clone())).collect(),
+            b"Tj" => vec![op.operands[0].as_string().unwrap().bytes.clone()],
+            _ => continue,
+        };
+        for code in strings.iter().flat_map(|s| s.chunks(2)) {
+            out.push(map.get(&u16::from_be_bytes([code[0], code[1]])).cloned().unwrap_or_default());
+        }
+    }
+    out
 }
 
 /// #1384: an edited left-to-right shaped run is not wrapped in one `/ActualText`, which made
@@ -5815,9 +5843,12 @@ fn an_edited_shaped_run_maps_each_glyph_to_its_own_characters() {
         let content = String::from_utf8_lossy(&page_content_bytes(&doc, 0)).into_owned();
         let spans: Vec<String> = content.split("/ActualText <FEFF").skip(1).filter_map(|s| s.split('>').next()).map(str::to_owned).collect();
         assert_eq!(spans, clusters.iter().map(|c| hex(c)).collect::<Vec<_>>(), "{typed}: {content}");
+        // What a reader ignoring ActualText copies: every glyph's own character, in drawing order,
+        // so two glyphs given each other's characters fail, not only empty entries.
+        let destinations = shaped_glyph_destinations(&doc);
+        assert_eq!(destinations.concat(), typed, "{typed}: {destinations:?}");
         if every_glyph_mapped {
-            let maps = page_to_unicode_maps(&doc);
-            assert!(maps.iter().all(|m| !m.contains("> <>")), "{typed}: {maps:?}");
+            assert_eq!(destinations, typed.chars().map(String::from).collect::<Vec<_>>(), "{typed}");
         }
     }
 }
